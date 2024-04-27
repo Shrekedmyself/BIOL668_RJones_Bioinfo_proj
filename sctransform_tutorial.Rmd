@@ -1,0 +1,91 @@
+---
+title: "Seurat sctransform tutorial"
+author: "Riley Jones"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Librarying and set seed:
+```{r, echo = F, warning = F}
+library(Seurat)
+library(tidyverse)
+library(sctransform)
+library(BiocManager)
+library(glmGamPoi)
+set.seed(777)
+```
+
+#Load data and create Seurat object
+```{r}
+pbmc_data <- Read10X(data.dir = '/Users/rileyjones/Desktop/UCSD/BIOINFORMATICS/Tutorials/filtered_gene_bc_matrices/hg19')
+pbmc <- CreateSeuratObject(counts = pbmc_data)
+```
+
+#Apply sctransform normalization
+
+1. This single command replaces `NormalizeData(), ScaleData(), and FindVariableFeatures()`
+2. Transformed data is available in the 'SCT' assay, which is the default after running `sctransform()`
+3. This will help to remove confounding sources of variation including mitochondrial mapping %
+```{r}
+#Storing mitochondrial percentage in the Seurat object metadata
+pbmc <- PercentageFeatureSet(pbmc, pattern = "^MT-", col.name = 'percent.mt')
+
+#Running `sctransform()`
+pbmc <- SCTransform(pbmc, vars.to.regress = 'percent.mt', verbose = F)
+#Results are saved in a new assay (named 'SCT' by default) with 'counts' being (corrected) counts, 'data' being log1p(counts), 'scale.data' being pearson residuals; `sctransform::vst` intermediate results are saved in 'misc' slot of new assay.
+```
+
+#Perform dimensionality reduction by PCA and UMAP
+```{r}
+pbmc <- RunPCA(pbmc, verbose = F)
+pbmc <- RunUMAP(pbmc, dims = 1:30, verbose = F)
+#Using PCs 1:30 as `sctransform()` will more effectively remove technical effects, leading to more effective normalization
+#sct will account for sequencing depth variation better, leading to more robust downstream analyses e.g. higher PCs are more likely to represent subtle, but biologically relevant sources of heterogeneity
+
+pbmc <- FindNeighbors(pbmc, dims = 1:30, verbose = FALSE)
+#Using PCs 1:30
+
+pbmc <- FindClusters(pbmc, verbose = FALSE)
+DimPlot(pbmc, label = TRUE)
+```
+
+#Alternative for above steps together using %>% 
+```{r}
+pbmc <- CreateSeuratObject(pbmc_data) %>%
+    PercentageFeatureSet(pattern = "^MT-", col.name = "percent.mt") %>%
+    SCTransform(vars.to.regress = "percent.mt") %>%
+    RunPCA() %>%
+    FindNeighbors(dims = 1:30) %>%
+    RunUMAP(dims = 1:30) %>%
+    FindClusters()
+```
+
+#### Where are normalized values stored for `sctransform()`?
+
+The results of sctransfrom are stored in the “SCT” assay.
+1.    `pbmc[["SCT"]]$scale.data` contains the residuals (normalized values), and is used directly as input to PCA. Please note that this matrix is non-sparse, and can therefore take up a lot of memory if stored for all genes. To save memory, we store these values only for variable genes, by setting the return.only.var.genes = TRUE by default in the SCTransform() function call.
+2.    To assist with visualization and interpretation, we also convert Pearson residuals back to ‘corrected’ UMI counts. You can interpret these as the UMI counts we would expect to observe if all cells were sequenced to the same depth. If you want to see exactly how we do this, please look at the correct function here.
+3.    The ‘corrected’ UMI counts are stored in `pbmc[["SCT"]]$counts`. We store log-normalized versions of these corrected counts in `pbmc[["SCT"]]$data`, which are very helpful for visualization.
+
+####Users can individually annotate clusters based on canonical markers. However, the sctransform normalization reveals sharper biological distinctions compared to the standard Seurat workflow, in a few ways:
+1.    Clear separation of at least 3 CD8 T cell populations (naive, memory, effector), based on CD8A, GZMK, CCL5, CCR7 expression
+2.    Clear separation of three CD4 T cell populations (naive, memory, IFN-activated) based on S100A4, CCR7, IL32, and ISG15
+3.    Additional developmental sub-structure in B cell cluster, based on TCL1A, FCER2
+4.    Additional separation of NK cells into CD56dim vs. bright clusters, based on XCL1 and FCGR3A
+
+```{r}
+# Visualize canonical marker genes as violin plots.
+VlnPlot(pbmc, features = c("CD8A", "GZMK", "CCL5", "S100A4", "ANXA1", "CCR7", "ISG15", "CD3D"),
+    pt.size = 0.2, ncol = 4)
+
+# Visualize canonical marker genes on the sctransform embedding.
+FeaturePlot(pbmc, features = c("CD8A", "GZMK", "CCL5", "S100A4", "ANXA1", "CCR7"), pt.size = 0.2,
+    ncol = 3)
+
+FeaturePlot(pbmc, features = c("CD3D", "ISG15", "TCL1A", "FCER2", "XCL1", "FCGR3A"), pt.size = 0.2,
+    ncol = 3)
+```

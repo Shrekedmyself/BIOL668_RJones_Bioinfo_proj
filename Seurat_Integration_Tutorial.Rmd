@@ -1,0 +1,236 @@
+---
+title: "Seurat Integration Tutorial"
+author: "Riley Jones"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Librarying
+```{r, echo = F, warning = F, include = F}
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+library(sctransform)
+library(tidyverse)
+library(metap)
+library(multtest)
+library(cowplot)
+set.seed(777)
+rm(list=ls())
+```
+
+# Integration tutorial setup
+
+## Integration goals
+1. Identify cell subpopulations that are present in both datasets
+2. Obtain cell type markers that are conserved in both control and stimulated cells
+3. Compare the datasets to find cell-type specific responses to stimulation
+
+#### Install the dataset
+```{r}
+InstallData("ifnb")
+```
+
+The object contains data from human PBMC from two conditions, interferon-stimulated and control cells (stored in the stim column in the object metadata). Aiming to integrate the two conditions together, so that we can jointly identify cell subpopulations across datasets, and then explore how each group differs across conditions
+
+### Keeping the data all together as one Seurat object however splitting it into multiple layers
+```{r, echo = F, warning = F}
+#Loading the dataset
+ifnb <- LoadData("ifnb")
+
+#Split the RNA measurements into two layers one for control cells, one for stimulated cells
+ifnb[["RNA"]] <- split(ifnb[["RNA"]], f = ifnb$stim)
+
+ifnb
+#Should say that there are four layers present, a '.STIM'/'.CTRL' for both the 'counts' and 'data'
+```
+
+# Preprocessing 
+```{r, echo = F}
+#Non-SCT method
+ifnb <- NormalizeData(ifnb)
+#Normalizing our data
+
+ifnb <- FindVariableFeatures(ifnb)
+#Finding our variable features (genes). Interestingly, it does not specify to find the mitochondrial genes or regress those out
+
+ifnb <- ScaleData(ifnb)
+#Scaling our data (will also center the data as well)
+
+ifnb <- RunPCA(ifnb)
+#Running linear dimensional reduction with PCA
+
+ifnb <- FindNeighbors(ifnb, dims = 1:30, reduction = "pca")
+#Using FindNeighbors to construct a (Jaccard) similarity matrix with a KNN approach with Euclidean distance
+
+ifnb <- FindClusters(ifnb, resolution = 2, cluster.name = "unintegrated_clusters")
+#Clustering the cells based upon similarity matrix from `FindNeighbors()`
+#Notice, this step will come before the UMAP whereas in other vignettes (sctransform), this is not the case
+
+ifnb <- RunUMAP(ifnb, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+#Using UMAP for non-linear dimensional reduction and visualization
+
+DimPlot(ifnb, reduction = "umap.unintegrated", group.by = c("stim", "seurat_clusters"))
+#Visualizing our UMAP based upon stimulation status (control vs stimulated) as we as by our cell clusters 
+```
+
+
+### Using SCTransform as SCTransform has replaced the NormalizeData steps 
+
+#### Performing without integration
+
+For some reason, the SCTransform method would not work completely so I'm commenting it out
+```{r, echo=F}
+#Getting the RNA data from our compiled object
+#ifnb_data <- ifnb$RNA
+
+#ifnb <- CreateSeuratObject(ifnb_data) %>% 
+    #Creating a Seurat Object
+    #PercentageFeatureSet(pattern = "^MT-", col.name = "percent.mt") %>% 
+    #Using regular expressions to find the percent of mitochondrial genes
+    #SCTransform(vars.to.regress = "percent.mt") %>%
+    #Regressing out the mitochondrial gene percentage
+    #RunPCA() %>%
+    #Running PCA for linear dimensional reduction
+    #FindNeighbors(dims = 1:30, reduction = "pca") %>%
+    #Using FindNeighbors to construct a (Jaccard) similarity matrix with a KNN approach with Euclidean distance
+    #FindClusters(resolution = 2, cluster.name = "unintegrated_clusters") %>% 
+    #Clustering the cells based upon similarity matrix from `FindNeighbors()`
+    #RunUMAP(dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated") %>%
+    #Using UMAP for non-linear dimensional reduction and visualization
+    #DimPlot(ifnb, reduction = "umap.unintegrated", group.by = c("stim", "seurat_clusters"))
+
+#Creating a dimension plot
+#DimPlot(ifnb, group.by = c("stim", "seurat_clusters"))
+#For some reason, this only shows the seurat clusters rather and not the stimulation state, but I'm not sure why it doesn't show the stimulation state
+#The authors also do not create a seurat object at the beginning either, just SCT
+
+# integrate datasets
+#ifnb <- IntegrateLayers(object = ifnb, method = CCAIntegration, normalization.method = "SCT", verbose = F)
+#ifnb <- FindNeighbors(ifnb, reduction = "integrated.dr", dims = 1:30)
+#ifnb <- FindClusters(ifnb, resolution = 0.6)
+
+#ifnb <- RunUMAP(ifnb, dims = 1:30, reduction = "integrated.dr")
+#DimPlot(ifnb, reduction = "umap", group.by = c("stim", "seurat_annotations"))
+
+# perform differential expression
+#ifnb <- PrepSCTFindMarkers(ifnb)
+#Note, this uses a different function than the non-SCT method
+#From ?PrepSCTFindMarkers(): Given a merged object with multiple SCT models, this function uses minimum of the median UMI (calculated using the raw UMI counts) of individual objects to reverse the individual SCT regression model using minimum of median UMI as the sequencing depth covariate. The counts slot of the SCT assay is replaced with recorrected counts and the data slot is replaced with log1p of recorrected counts.
+
+#ifnb$celltype.stim <- paste(ifnb$seurat_annotations, ifnb$stim, sep = "_")
+#Idents(ifnb) <- "celltype.stim"
+#b.interferon.response <- FindMarkers(ifnb, ident.1 = "B_STIM", ident.2 = "B_CTRL", verbose = FALSE)
+```
+# Perform integration
+
+Goals: 
+1) Integrate data from the two conditions, so that cells from the same cell type/subpopulation will cluster together
+2) Identification of shared/homologous regions that can help to interpret differences between the sequences as well. This does not involve removal of biological variation/differences but rather learn shared cell types/states in a shared step
+3) Capture the shared sources of variance across multiple layers, so that cells in a similar biological state will cluster (similar as #1 but different)
+```{r, echo = F}
+
+#Notice, this step will take a while (like several minutes so just be prepared)
+ifnb <- IntegrateLayers(object = ifnb, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca", verbose = FALSE)
+#Use curvilinear components analysis (CCA) to integrate with our original dimensional reduction of PCA
+
+#Re-joining the layers after integration
+ifnb[["RNA"]] <- JoinLayers(ifnb[["RNA"]])
+
+ifnb <- FindNeighbors(ifnb, reduction = "integrated.cca", dims = 1:30)
+#After our integration, rerunning `FindNeighbors` on our CCA-integrated object across our 30 components
+
+ifnb <- FindClusters(ifnb, resolution = 1)
+#Rerunning `FindClusters` after integration
+
+ifnb <- RunUMAP(ifnb, dims = 1:30, reduction = "integrated.cca")
+#Rerunning our UMAP after integration
+
+DimPlot(ifnb, reduction = "umap", group.by = c("stim", "seurat_annotations"))
+#Viewing our UMAP after integration
+#This should have overlap of cells on our "stim" plot regardless of stimulation status, as well as our annotated cell clusters on the right
+#Don't know what 'Mk' cells are, perhaps macrophages? But I've never seen that designation before for macrophages, regardless of tissue residency status (or if they're embryonic or adult-derived macrophages), or M1/M2 state
+
+DimPlot(ifnb, reduction = "umap", split.by = "stim")
+#Visualizing our cell clusters by stimulation state
+```
+
+# Identify conserved cell markers
+
+Identifying conserved cell type markers across conditions via differential gene expression testing for each dataset/group and combining the p-values.
+```{r, echo = F}
+Idents(ifnb) <- "seurat_annotations"
+nk.markers <- FindConservedMarkers(ifnb, ident.1 = "NK", grouping.var = "stim", verbose = FALSE)
+#Uses a priori knowledge of cluster 1 genes as NK cell markers
+#Note, this will save all cluster 1 markers, not just the top # markers
+
+head(nk.markers)
+
+#Alternatively, you can perform these same analysis on the unsupervised clustering results (stored in seurat_clusters), and use these conserved markers to annotate cell types in your dataset.
+
+#Visualizing conserved cell type markers across conditions with `DotPlot()` as well as the `split.by()` argument
+Idents(ifnb) <- factor(Idents(ifnb), levels = c("pDC", "Eryth", "Mk", "DC", "CD14 Mono", "CD16 Mono", "B Activated", "B", "CD8 T", "NK", "T activated", "CD4 Naive T", "CD4 Memory T"))
+#Set the identity levels to be the respective cell types
+
+markers.to.plot <- c("CD3D", "CREM", "HSPH1", "SELL", "GIMAP5", "CACYBP", "GNLY", "NKG7", "CCL5",  "CD8A", "MS4A1", "CD79A", "MIR155HG", "NME1", "FCGR3A", "VMO1", "CCL2", "S100A9", "HLA-DQA1",  "GPR183", "PPBP", "GNG11", "HBA2", "HBB", "TSPAN13", "IL3RA", "IGJ", "PRSS57")
+#Created a list of markers to plot on our dotplot
+
+DotPlot(ifnb, features = markers.to.plot, cols = c("blue", "red"), dot.scale = 8, split.by = "stim") + RotatedAxis()
+#Visualizing genes on the x-axis with cell types paired by cell state on the y-axis
+```
+
+# Identify differentially expressed genes acrossed conditions
+
+Aggregating cells of a similar type and condition together to create "pseudobulk" profiles using `AggregateExpression()`. This will allow us to be able to view how cell types change their gene expression profiles before and after stimulation, such as with interferon (in this example).
+```{r, echo = F}
+theme_set(theme_cowplot())
+#We really love cows so we're making them our theme
+## What is this, chick-fil-a?
+
+aggregate_ifnb <- AggregateExpression(ifnb, group.by = c("seurat_annotations", "stim"), return.seurat = TRUE)
+#Setting up our pseudobulk object
+
+genes.to.label = c("ISG15", "LY6E", "IFI6", "ISG20", "MX1", "IFIT2", "IFIT1", "CXCL10", "CCL8")
+#Labeling our genes of interest in our correlation plot(?)
+
+p1 <- CellScatter(aggregate_ifnb, "CD14 Mono_CTRL", "CD14 Mono_STIM", highlight = genes.to.label)
+#Looking at our CD14+ monocytes
+p2 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE)
+
+p3 <- CellScatter(aggregate_ifnb, "CD4 Naive T_CTRL", "CD4 Naive T_STIM", highlight = genes.to.label)
+#Looking at our CD4+ T-cells
+p4 <- LabelPoints(plot = p3, points = genes.to.label, repel = TRUE)
+
+p2 + p4
+#We can see several interferon stimulated genes (such as ISGs, as well as several IFITs, and some chemokines)
+```
+
+How can we see which genes change in different conditions of cells in the same type?
+1) Create a new column to hold both cell type and stimulation condition -> switch over to it
+2) Use `FindMarkers()` to find DEGs but interpret p-values with caution
+3) Make sure you are not ignoring inherent correlations between cells originating from the same sample (read the authors vignette basically)
+```{r, echo = F}
+ifnb$celltype.stim <- paste(ifnb$seurat_annotations, ifnb$stim, sep = "_")
+#Creating a separate column with both cell type as well as stimulation status
+
+Idents(ifnb) <- "celltype.stim"
+#Adding it in to the 'Idents' layer
+
+b.interferon.response <- FindMarkers(ifnb, ident.1 = "B_STIM", ident.2 = "B_CTRL", verbose = FALSE)
+#Using `FindMarkers()` to find DEGs indicative of an interferon response
+
+head(b.interferon.response, n = 15)
+#Top 15 genes
+
+#Can also visualize with `FeaturePlot()` and split it by stimulation status with three genes of interest and overlay their expression on our UMAP
+FeaturePlot(ifnb, features = c("CD3D", "GNLY", "IFI6"), split.by = "stim", max.cutoff = 3, cols = c("grey",  "red"), reduction = "umap")
+
+#Same thing as above but with a violin plot
+plots <- VlnPlot(ifnb, features = c("LYZ", "ISG15", "CXCL10"), split.by = "stim", group.by = "seurat_annotations", pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+#May need to adjust the dimensions on the violin plot as it will flatten the plot (it looks fine in a sufficiently large pop up)
+```

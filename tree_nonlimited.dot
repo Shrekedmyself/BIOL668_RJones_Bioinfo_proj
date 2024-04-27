@@ -1,0 +1,6 @@
+digraph Tree {
+node [shape=box, style="filled, rounded", color="black", fontname="helvetica"] ;
+edge [fontname="helvetica"] ;
+0 [label="fuso <= 9.9\ngini = 0.46\nsamples = 48\nvalue = [31, 17]\nclass = status", fillcolor="#f3c6a6"] ;
+1 [label="gini = 0.0\nsamples = 31\nvalue = [31, 0]\nclass = status", fillcolor="#e58139"] ;
+0 -> 1 [labeldistance=2.5, labelangle=45, headlabel="True"] ;
